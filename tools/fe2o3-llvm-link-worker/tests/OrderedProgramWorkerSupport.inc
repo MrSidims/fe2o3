@@ -16,12 +16,11 @@ std::unique_ptr<TargetMachine> createMachine() {
   Triple TripleValue(TripleName);
   std::string Diagnostic;
   const Target *TargetValue =
-      TargetRegistry::lookupTarget("amdgcn", TripleValue, Diagnostic);
+      TargetRegistry::lookupTarget(TripleValue, Diagnostic);
   require(TargetValue != nullptr, Diagnostic);
   TargetOptions Options;
   std::unique_ptr<TargetMachine> Machine(TargetValue->createTargetMachine(
-      TripleValue, "gfx942", "-xnack,-wavefrontsize32,+wavefrontsize64",
-      Options, Reloc::PIC_, CodeModel::Small, CodeGenOptLevel::None));
+      TripleValue, "gfx942", "-wavefrontsize32,+wavefrontsize64", Options, Reloc::PIC_, CodeModel::Small, CodeGenOptLevel::None));
   require(Machine != nullptr, "cannot create pinned gfx942 machine");
   return Machine;
 }
@@ -122,7 +121,7 @@ void checkInspectionDiagnostics(ArrayRef<std::string> Diagnostics,
                            Symbol.str() + "," + Symbol.str() + ".kd]";
     Unresolved += Text == "post_link.check=unresolved status=ok symbols=[]";
     Metadata += Text == "post_link.check=metadata status=ok kernels=1 "
-                        "target=amdgcn-amd-amdhsa--gfx942%3Axnack-";
+                        "target=amdgpu9.42-amd-amdhsa-unknown-gfx942%3Axnack-";
     Kernels += Text.starts_with("post_link.kernel name=" + Symbol.str() +
                                 " symbol=" + Symbol.str() + ".kd ") &&
                Text.ends_with(" wavefront_size=64 max_workgroup_size=64 "

@@ -469,3 +469,23 @@ fn malformed_count_result_type_is_rejected_by_real_admission_before_lowering() {
         assert!(bind_production_target_v1(&module, profile).is_err());
     }
 }
+
+#[test]
+fn mlir_v1_counted_private_allocations_match_the_textual_emitter() {
+    use crate::mlir_differential_v1::{BOTH_TARGETS, assert_equivalent, exact};
+    for target in BOTH_TARGETS {
+        for (name, module) in [
+            (
+                "alloca_u32x4",
+                module_with_count(Constant::Index(4), scalar(ScalarType::U32), 16),
+            ),
+            (
+                "alloca_f64x4",
+                module_with_count(Constant::Index(4), scalar(ScalarType::F64), 8),
+            ),
+            ("alloca_first_last", first_last_memory_module()),
+        ] {
+            assert_equivalent(name, &exact(module, target), target);
+        }
+    }
+}

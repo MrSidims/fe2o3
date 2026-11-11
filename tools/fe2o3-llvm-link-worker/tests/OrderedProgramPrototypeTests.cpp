@@ -56,7 +56,7 @@ using namespace fe2o3::worker;
 using namespace llvm;
 
 namespace {
-constexpr StringLiteral TripleName = "amdgcn-amd-amdhsa";
+constexpr StringLiteral TripleName = "amdgpu9.42-amd-amdhsa";
 constexpr StringLiteral KernelName = "ordered_program_fixture";
 constexpr StringLiteral Constraints = "=&{v33},{v34},{v35},{v36},~{v32}";
 constexpr size_t FixtureByteLimit = 64 * 1024;

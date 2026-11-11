@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(fe2o3_llvm_link_worker LANGUAGES CXX)
+project(fe2o3_llvm_link_worker LANGUAGES C CXX)
 
 if(NOT DEFINED LLVM_DIR OR LLVM_DIR STREQUAL "")
   message(FATAL_ERROR "LLVM_DIR must name the explicit pinned LLVM CMake package")
@@ -42,6 +42,42 @@ if(NOT LLVM_PACKAGE_VERSION STREQUAL FE2O3_PINNED_LLVM_VERSION)
   message(FATAL_ERROR
     "LLVM version mismatch: found '${LLVM_PACKAGE_VERSION}', expected "
     "'${FE2O3_PINNED_LLVM_VERSION}'")
+endif()
+
+# Engineering-only MLIR input (InputKind 4). Off by default; when on, the
+# option and the MLIR package version enter the measurement preimage, so an
+# MLIR-capable worker never shares a build identity with a production worker.
+option(FE2O3_WORKER_ENABLE_MLIR_INPUT
+  "Accept textual llvm/rocdl-dialect MLIR inputs (engineering only)" OFF)
+set(FE2O3_WORKER_MLIR_INPUT_VALUE 0)
+set(FE2O3_WORKER_MLIR_VERSION "none")
+set(FE2O3_WORKER_MLIR_LIBS)
+if(FE2O3_WORKER_ENABLE_MLIR_INPUT)
+  if(NOT DEFINED MLIR_DIR OR MLIR_DIR STREQUAL "")
+    message(FATAL_ERROR
+      "MLIR_DIR must name the MLIR CMake package of the pinned LLVM tree")
+  endif()
+  find_package(MLIR REQUIRED CONFIG NO_DEFAULT_PATH PATHS "${MLIR_DIR}")
+  file(REAL_PATH "${MLIR_DIR}" FE2O3_REAL_MLIR_DIR)
+  get_filename_component(FE2O3_MLIR_CMAKE_ROOT "${FE2O3_REAL_MLIR_DIR}"
+    DIRECTORY)
+  if(NOT FE2O3_MLIR_CMAKE_ROOT STREQUAL FE2O3_LLVM_CMAKE_ROOT)
+    message(FATAL_ERROR
+      "MLIR_DIR and LLVM_DIR must come from one CMake package tree")
+  endif()
+  if(NOT MLIR_VERSION STREQUAL FE2O3_PINNED_LLVM_VERSION)
+    message(FATAL_ERROR
+      "MLIR version mismatch: found '${MLIR_VERSION}', expected "
+      "'${FE2O3_PINNED_LLVM_VERSION}'")
+  endif()
+  set(FE2O3_WORKER_MLIR_INPUT_VALUE 1)
+  set(FE2O3_WORKER_MLIR_VERSION "${MLIR_VERSION}")
+  # Static MLIR archives only: the worker executable, not a second shared
+  # library, carries the measured translation code.
+  set(FE2O3_WORKER_MLIR_LIBS
+    MLIRParser MLIRLLVMDialect MLIRROCDLDialect MLIRTargetLLVMIRExport
+    MLIRBuiltinToLLVMIRTranslation MLIRLLVMToLLVMIRTranslation
+    MLIRROCDLToLLVMIRTranslation)
 endif()
 file(READ "${FE2O3_LLVM_BUILD_ID_FILE}" FE2O3_MEASURED_LLVM_BUILD_ID)
 string(STRIP "${FE2O3_MEASURED_LLVM_BUILD_ID}" FE2O3_MEASURED_LLVM_BUILD_ID)
@@ -237,13 +273,19 @@ foreach(FE2O3_GFX950_FILE_INDEX RANGE ${FE2O3_GFX950_FILE_LAST})
 endforeach()
 string(APPEND FE2O3_WORKER_MEASUREMENT_PREIMAGE
   "|cxx=20|target_flags=-fno-exceptions,-fno-rtti")
+if(FE2O3_WORKER_ENABLE_MLIR_INPUT)
+  string(APPEND FE2O3_WORKER_MEASUREMENT_PREIMAGE
+    "|mlir_input=1|mlir_version=${FE2O3_WORKER_MLIR_VERSION}")
+endif()
 foreach(FE2O3_WORKER_SOURCE IN ITEMS
     CMakeLists.txt cmake/Gfx950ProviderProfile.cmake
     include/WorkerProtocol.h include/WorkerPipeline.h
     include/WorkerDeviceLibraryPolicy.h include/WorkerBuildConfig.h.in
     include/WorkerLldPolicy.h include/WorkerMachineEffect.h
+    include/WorkerMlirInput.h
     src/WorkerProtocol.cpp src/WorkerPipeline.cpp
-    src/WorkerDeviceLibraryPolicy.cpp src/WorkerMachineEffect.cpp src/main.cpp)
+    src/WorkerDeviceLibraryPolicy.cpp src/WorkerMachineEffect.cpp
+    src/WorkerMlirInput.cpp src/main.cpp)
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/${FE2O3_WORKER_SOURCE}")
   file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/${FE2O3_WORKER_SOURCE}"
@@ -265,7 +307,8 @@ target_include_directories(fe2o3_worker_protocol
 target_include_directories(fe2o3_worker_protocol SYSTEM PUBLIC
   ${LLVM_INCLUDE_DIRS})
 target_compile_definitions(fe2o3_worker_protocol PUBLIC
-  FE2O3_PINNED_LLVM_VERSION_MAJOR=${LLVM_VERSION_MAJOR})
+  FE2O3_PINNED_LLVM_VERSION_MAJOR=${LLVM_VERSION_MAJOR}
+  FE2O3_WORKER_MLIR_INPUT=${FE2O3_WORKER_MLIR_INPUT_VALUE})
 target_compile_definitions(fe2o3_worker_protocol PRIVATE
   FE2O3_LLVM_BUILD_ID="${FE2O3_MEASURED_LLVM_BUILD_ID}"
   FE2O3_WORKER_BUILD_ID="${FE2O3_WORKER_MEASUREMENT}")
@@ -275,7 +318,13 @@ target_link_libraries(fe2o3_worker_protocol PUBLIC
   ${FE2O3_LLVM_PROTOCOL_LIBS})
 
 add_library(fe2o3_worker_pipeline STATIC src/WorkerPipeline.cpp
-  src/WorkerDeviceLibraryPolicy.cpp src/WorkerMachineEffect.cpp)
+  src/WorkerDeviceLibraryPolicy.cpp src/WorkerMachineEffect.cpp
+  src/WorkerMlirInput.cpp)
+if(FE2O3_WORKER_ENABLE_MLIR_INPUT)
+  # MLIR headers only reach the translation unit that hosts the MLIR stage.
+  set_property(SOURCE src/WorkerMlirInput.cpp APPEND PROPERTY
+    INCLUDE_DIRECTORIES ${MLIR_INCLUDE_DIRS})
+endif()
 target_include_directories(fe2o3_worker_pipeline
   PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(fe2o3_worker_pipeline SYSTEM PRIVATE
@@ -288,7 +337,7 @@ target_compile_definitions(fe2o3_worker_pipeline PRIVATE
 target_compile_options(fe2o3_worker_pipeline PRIVATE -Wall -Wextra -Wpedantic
   -Werror -Wno-unused-parameter -fno-exceptions -fno-rtti)
 target_link_libraries(fe2o3_worker_pipeline PUBLIC fe2o3_worker_protocol
-  lldELF lldCommon ${FE2O3_LLVM_LIBS})
+  lldELF lldCommon ${FE2O3_WORKER_MLIR_LIBS} ${FE2O3_LLVM_LIBS})
 
 add_executable(fe2o3-llvm-link-worker src/main.cpp)
 target_compile_definitions(fe2o3-llvm-link-worker PRIVATE
@@ -326,6 +375,28 @@ if(BUILD_TESTING)
     fe2o3_worker_pipeline ${FE2O3_LLVM_TEST_LIBS})
   add_test(NAME fe2o3-worker-pipeline-tests
     COMMAND fe2o3-worker-pipeline-tests)
+  # Runs in both configurations: with MLIR input it checks byte-identical HSACO
+  # against textual LLVM IR, and without it checks that kind 4 is refused.
+  add_executable(fe2o3-worker-mlir-input-tests tests/MlirInputTests.cpp)
+  target_include_directories(fe2o3-worker-mlir-input-tests SYSTEM PRIVATE
+    ${LLVM_INCLUDE_DIRS} ${LLD_INCLUDE_DIRS})
+  target_compile_definitions(fe2o3-worker-mlir-input-tests PRIVATE
+    FE2O3_LLVM_BUILD_ID="${FE2O3_MEASURED_LLVM_BUILD_ID}"
+    FE2O3_WORKER_BUILD_ID="${FE2O3_WORKER_MEASUREMENT}")
+  target_compile_options(fe2o3-worker-mlir-input-tests PRIVATE -Wall -Wextra
+    -Wpedantic -Werror -Wno-unused-parameter -fno-exceptions -fno-rtti)
+  target_link_libraries(fe2o3-worker-mlir-input-tests PRIVATE
+    fe2o3_worker_pipeline ${FE2O3_LLVM_TEST_LIBS})
+  add_test(NAME fe2o3-worker-mlir-input-tests
+    COMMAND fe2o3-worker-mlir-input-tests)
+  set_tests_properties(fe2o3-worker-mlir-input-tests PROPERTIES TIMEOUT 300)
+  # Forks before any LLVM or MLIR state exists and runs the MLIR stage under
+  # the machine-effect resource limits; skipped (77) where RLIMIT_NPROC does
+  # not deny threads or the build refuses MLIR input.
+  add_test(NAME fe2o3-worker-mlir-input-thread-free
+    COMMAND fe2o3-worker-mlir-input-tests --thread-free)
+  set_tests_properties(fe2o3-worker-mlir-input-thread-free PROPERTIES
+    TIMEOUT 300 SKIP_RETURN_CODE 77)
   add_executable(fe2o3-worker-device-library-policy-tests
     tests/DeviceLibraryPolicyTests.cpp)
   add_executable(fe2o3-worker-machine-effect-tests

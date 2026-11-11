@@ -108,3 +108,21 @@ fn volatile_guarded_load_lowers_to_a_non_speculative_cfg_diamond() {
         true,
     );
 }
+
+#[path = "support/mlir_differential_v1.rs"]
+mod mlir_differential_v1;
+
+#[test]
+fn mlir_v1_guarded_loads_match_the_textual_emitter() {
+    use mlir_differential_v1::{BOTH_TARGETS, assert_equivalent, exact};
+    for target in BOTH_TARGETS {
+        for volatile in [false, true] {
+            let name = if volatile {
+                "guarded_volatile"
+            } else {
+                "guarded"
+            };
+            assert_equivalent(name, &exact(guarded_load_module(volatile), target), target);
+        }
+    }
+}

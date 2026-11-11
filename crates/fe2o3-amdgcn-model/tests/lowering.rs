@@ -3604,9 +3604,14 @@ fn rocm_compiles_the_golden_to_an_amdgpu_code_object() {
     );
     let report = String::from_utf8(result.stdout).unwrap();
 
+    // llvm-readobj spells the ELF arch `amdgcn` through LLVM 22 and `amdgpu` from
+    // LLVM 24 (subarch triples); e_machine and the MACH flag below stay exact.
+    assert!(
+        report.contains("Arch: amdgcn") || report.contains("Arch: amdgpu"),
+        "missing AMDGPU ELF arch in:\n{report}"
+    );
     for invariant in [
         "Format: elf64-amdgpu",
-        "Arch: amdgcn",
         "Class: 64-bit (0x2)",
         "DataEncoding: LittleEndian (0x1)",
         "OS/ABI: AMDGPU_HSA (0x40)",
@@ -3676,3 +3681,9 @@ fn rocm_compiles_the_golden_to_an_amdgpu_code_object() {
     };
     assert_occurrences(metadata, &expected_target, 1);
 }
+
+#[path = "support/mlir_differential_v1.rs"]
+mod mlir_differential_v1;
+
+#[path = "lowering/mlir_text_v1.rs"]
+mod mlir_text_v1;

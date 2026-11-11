@@ -27,21 +27,21 @@ std::vector<Row> expectedRows() {
   };
 }
 struct Mc {
-  MCTargetOptions Options; Triple TargetTriple{"amdgcn-amd-amdhsa"};
+  MCTargetOptions Options; Triple TargetTriple{"amdgpu9.50-amd-amdhsa"};
   std::unique_ptr<MCRegisterInfo> Registers; std::unique_ptr<MCInstrInfo> Instructions;
   std::unique_ptr<MCSubtargetInfo> Subtarget; std::unique_ptr<MCAsmInfo> AsmInfo;
   std::unique_ptr<MCContext> Context; std::unique_ptr<MCDisassembler> Disassembler;
   std::unique_ptr<MCCodeEmitter> Encoder;
   Mc() {
     std::string Diagnostic;
-    const Target *T = TargetRegistry::lookupTarget("amdgcn", TargetTriple, Diagnostic);
+    const Target *T = TargetRegistry::lookupTarget(TargetTriple, Diagnostic);
     require(T != nullptr, Diagnostic);
     Registers.reset(T->createMCRegInfo(TargetTriple)); Instructions.reset(T->createMCInstrInfo());
-    Subtarget.reset(T->createMCSubtargetInfo(TargetTriple,"gfx950","-xnack,-wavefrontsize32,+wavefrontsize64"));
+    Subtarget.reset(T->createMCSubtargetInfo(TargetTriple,"gfx950","-wavefrontsize32,+wavefrontsize64"));
     require(Registers && Instructions && Subtarget, "MC target tables");
     AsmInfo.reset(T->createMCAsmInfo(*Registers,TargetTriple,Options));
     require(AsmInfo != nullptr, "MC asm table");
-    Context = std::make_unique<MCContext>(TargetTriple,AsmInfo.get(),Registers.get(),Subtarget.get(),nullptr,&Options);
+    Context = std::make_unique<MCContext>(TargetTriple,*AsmInfo,*Registers,*Subtarget);
     Disassembler.reset(T->createMCDisassembler(*Subtarget,*Context));
     Encoder.reset(T->createMCCodeEmitter(*Instructions,*Context));
     require(Disassembler && Encoder, "MC decoder/encoder");

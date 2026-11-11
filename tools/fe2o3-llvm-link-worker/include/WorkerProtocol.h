@@ -16,6 +16,12 @@
     "FE2O3_PINNED_LLVM_VERSION_MAJOR must be provided by the pinned worker build"
 #endif
 
+// MLIR input is engineering-only and opt-in. Translation units built outside
+// the worker CMake option (other tools that reuse this header) refuse it.
+#ifndef FE2O3_WORKER_MLIR_INPUT
+#define FE2O3_WORKER_MLIR_INPUT 0
+#endif
+
 static_assert(LLVM_VERSION_MAJOR == FE2O3_PINNED_LLVM_VERSION_MAJOR,
               "worker headers do not match the pinned LLVM major version");
 
@@ -38,6 +44,10 @@ enum class InputKind : uint8_t {
   LlvmBitcode = 1,
   AmdGpuRelocatable = 2,
   LlvmTextIr = 3,
+  // Engineering-only: textual MLIR in the llvm/rocdl dialects. Decoded only by
+  // a worker built with FE2O3_WORKER_ENABLE_MLIR_INPUT; others refuse it as an
+  // unknown kind.
+  MlirLlvmText = 4,
 };
 enum class OptimizationLevel : uint8_t { O0 = 0, O1 = 1, O2 = 2, O3 = 3 };
 enum class Stage : uint8_t {

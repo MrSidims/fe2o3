@@ -25,6 +25,8 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
+#include "llvm/TargetParser/AMDGPUTargetParser.h"
+#include "llvm/TargetParser/Triple.h"
 
 #include <algorithm>
 #include <array>
@@ -148,9 +150,13 @@ std::unique_ptr<TargetMachine> createMachine(StringRef Cpu) {
   (void)Initialized;
 
   Triple TripleValue(AmdGpuTriple);
+  Triple::SubArchType SubArch =
+      AMDGPU::getSubArch(AMDGPU::parseArchAMDGCN(Cpu));
+  if (SubArch != Triple::NoSubArch)
+    TripleValue.setArch(Triple::amdgpu, SubArch);
   std::string LookupError;
   const Target *TargetValue =
-      TargetRegistry::lookupTarget("amdgcn", TripleValue, LookupError);
+      TargetRegistry::lookupTarget(TripleValue, LookupError);
   require(TargetValue != nullptr, LookupError);
   TargetOptions OptionsValue;
   std::unique_ptr<TargetMachine> Machine(TargetValue->createTargetMachine(
@@ -166,7 +172,7 @@ std::unique_ptr<Module> makeModule(LLVMContext &Context, StringRef ModuleName,
                                    const FixtureOptions &Options) {
   auto Result = std::make_unique<Module>(ModuleName, Context);
   std::unique_ptr<TargetMachine> Machine = createMachine(Options.Cpu);
-  Result->setTargetTriple(Triple(AmdGpuTriple));
+  Result->setTargetTriple(Machine->getTargetTriple());
   if (Options.Layout == LayoutMode::Exact)
     Result->setDataLayout(Machine->createDataLayout());
   else if (Options.Layout == LayoutMode::Incompatible)
@@ -223,7 +229,7 @@ makeFloatConsumerBitcode(StringRef Entry, ArrayRef<StringRef> Imports,
   LLVMContext Context;
   Module ModuleValue("float-consumer", Context);
   std::unique_ptr<TargetMachine> Machine = createMachine("gfx942");
-  ModuleValue.setTargetTriple(Triple(AmdGpuTriple));
+  ModuleValue.setTargetTriple(Machine->getTargetTriple());
   ModuleValue.setDataLayout(Machine->createDataLayout());
   ModuleValue.addModuleFlag(Module::Error, "amdhsa_code_object_version",
                             CodeObjectVersion * 100);
@@ -260,7 +266,7 @@ std::vector<uint8_t> makeOcmlKernelBitcode(StringRef Import = "__ocml_sin_f32",
   LLVMContext Context;
   Module ModuleValue("gfx942-ocml-sin-kernel", Context);
   std::unique_ptr<TargetMachine> Machine = createMachine("gfx942");
-  ModuleValue.setTargetTriple(Triple(AmdGpuTriple));
+  ModuleValue.setTargetTriple(Machine->getTargetTriple());
   ModuleValue.setDataLayout(Machine->createDataLayout());
   ModuleValue.addModuleFlag(Module::Error, "amdhsa_code_object_version",
                             CodeObjectVersion * 100);
@@ -449,8 +455,9 @@ makeSyntheticOcmlBitcode(const SyntheticOcmlOptions &Options = {}) {
   LLVMContext Context;
   Module ModuleValue("synthetic-ocml", Context);
   std::unique_ptr<TargetMachine> Machine = createMachine("gfx942");
-  ModuleValue.setTargetTriple(
-      Triple(Options.WrongTriple ? "nvptx64-nvidia-cuda" : AmdGpuTriple));
+  ModuleValue.setTargetTriple(Options.WrongTriple
+                                  ? Triple("nvptx64-nvidia-cuda")
+                                  : Machine->getTargetTriple());
   if (Options.Layout == LayoutMode::Exact)
     ModuleValue.setDataLayout(Machine->createDataLayout());
   else if (Options.Layout == LayoutMode::Incompatible)
@@ -536,7 +543,7 @@ std::vector<uint8_t> makeEmptyProviderBitcode(StringRef Name) {
   LLVMContext Context;
   Module ModuleValue(Name, Context);
   std::unique_ptr<TargetMachine> Machine = createMachine("gfx942");
-  ModuleValue.setTargetTriple(Triple(AmdGpuTriple));
+  ModuleValue.setTargetTriple(Machine->getTargetTriple());
   ModuleValue.setDataLayout(Machine->createDataLayout());
   ModuleValue.addModuleFlag(Module::Error, "amdhsa_code_object_version", 500);
   SmallVector<char, 0> Buffer;
@@ -558,6 +565,45 @@ std::vector<uint8_t> makeTextIr(StringRef ModuleName, StringRef Definition,
   return std::vector<uint8_t>(Buffer.begin(), Buffer.end());
 }
 
+// Re-spells the module header of a textual IR fixture the way a pre-LLVM-24
+// frontend writes it: no-subarch triple and an explicit legacy data layout.
+std::vector<uint8_t> withLegacyTextHeader(std::vector<uint8_t> Text,
+                                          StringRef Layout) {
+  std::string Value(Text.begin(), Text.end());
+  std::string Rewritten;
+  StringRef Rest(Value);
+  bool SawLayout = false, SawTriple = false;
+  while (!Rest.empty()) {
+    auto [Line, Tail] = Rest.split('\n');
+    if (Line.starts_with("target datalayout = ")) {
+      Rewritten += ("target datalayout = \"" + Layout + "\"").str();
+      SawLayout = true;
+    } else if (Line.starts_with("target triple = ")) {
+      Rewritten += "target triple = \"amdgcn-amd-amdhsa\"";
+      SawTriple = true;
+    } else {
+      Rewritten += Line.str();
+    }
+    Rewritten += '\n';
+    Rest = Tail;
+  }
+  require(SawLayout && SawTriple, "text fixture lost its module header");
+  return std::vector<uint8_t>(Rewritten.begin(), Rewritten.end());
+}
+
+// LLVM 22 TargetMachine layout (no m:e, no p10-p15) and the rustc built-in
+// spelling (m:e, no p10-p15). LLVM 24 auto-upgrades both to its own layout.
+constexpr StringLiteral Llvm22WorkerLayout =
+    "e-p:64:64-p1:64:64-p2:32:32-p3:32:32-p4:64:64-p5:32:32-p6:32:32-"
+    "p7:160:256:256:32-p8:128:128:128:48-p9:192:256:256:32-i64:64-v16:16-"
+    "v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-"
+    "v2048:2048-n32:64-S32-A5-G1-ni:7:8:9";
+constexpr StringLiteral RustcV1Layout =
+    "e-m:e-p:64:64-p1:64:64-p2:32:32-p3:32:32-p4:64:64-p5:32:32-p6:32:32-"
+    "p7:160:256:256:32-p8:128:128:128:48-p9:192:256:256:32-i64:64-v16:16-"
+    "v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-"
+    "v2048:2048-n32:64-S32-A5-G1-ni:7:8:9";
+
 std::vector<uint8_t>
 makeKernelBitcode(StringRef Name,
                   std::optional<std::array<uint32_t, 3>> RequiredWorkgroup =
@@ -567,7 +613,7 @@ makeKernelBitcode(StringRef Name,
   LLVMContext Context;
   auto ModuleValue = std::make_unique<Module>("publication-kernel", Context);
   std::unique_ptr<TargetMachine> Machine = createMachine("gfx942");
-  ModuleValue->setTargetTriple(Triple(AmdGpuTriple));
+  ModuleValue->setTargetTriple(Machine->getTargetTriple());
   ModuleValue->setDataLayout(Machine->createDataLayout());
   ModuleValue->addModuleFlag(Module::Error, "amdhsa_code_object_version",
                              CodeObjectVersion * 100);
@@ -605,7 +651,7 @@ std::vector<uint8_t> makeSemanticAnchorKernelBitcode(bool Anchored) {
   LLVMContext Context;
   Module ModuleValue("semantic-anchor-kernel", Context);
   std::unique_ptr<TargetMachine> Machine = createMachine("gfx942");
-  ModuleValue.setTargetTriple(Triple(AmdGpuTriple));
+  ModuleValue.setTargetTriple(Machine->getTargetTriple());
   ModuleValue.setDataLayout(Machine->createDataLayout());
   ModuleValue.addModuleFlag(Module::Error, "amdhsa_code_object_version", 600);
 
@@ -670,7 +716,7 @@ std::vector<uint8_t> makeCov6TwoKernelBitcode() {
   LLVMContext Context;
   Module ModuleValue("cov6-two-kernel", Context);
   std::unique_ptr<TargetMachine> Machine = createMachine("gfx942");
-  ModuleValue.setTargetTriple(Triple(AmdGpuTriple));
+  ModuleValue.setTargetTriple(Machine->getTargetTriple());
   ModuleValue.setDataLayout(Machine->createDataLayout());
   ModuleValue.addModuleFlag(Module::Error, "amdhsa_code_object_version", 600);
 
@@ -1221,8 +1267,8 @@ void redirectMetadataProgramHeaderToCopy(std::vector<uint8_t> &Bytes,
   std::vector<uint8_t> Segment(Bytes.begin() + SegmentOffset,
                                Bytes.begin() + SegmentOffset + SegmentSize);
   if (MakeConflicting)
-    replaceMetadataText(Segment, "amdgcn-amd-amdhsa--gfx942:xnack-",
-                        "amdgcn-amd-amdhsa--gfx942:xnack+");
+    replaceMetadataText(Segment, "amdgpu9.42-amd-amdhsa-unknown-gfx942:xnack-",
+                        "amdgpu9.42-amd-amdhsa-unknown-gfx942:xnack+");
   size_t NewOffset = Bytes.size();
   size_t Remainder = NewOffset % SegmentAlignment;
   if (Remainder != 0) {
@@ -1830,6 +1876,26 @@ int main(int ArgumentCount, char **Arguments) {
       {"text_entry", "text_helper"});
   runSuccess(TextPair, {"text_entry", "text_helper"});
 
+  for (StringRef Layout : {StringRef(Llvm22WorkerLayout),
+                           StringRef(RustcV1Layout)}) {
+    Request LegacyText = makeRequest(
+        {makeInput(InputKind::LlvmTextIr,
+                   withLegacyTextHeader(makeTextIr("legacy-text",
+                                                   "legacy_text", std::nullopt),
+                                        Layout))},
+        {"legacy_text"});
+    runSuccess(LegacyText, {"legacy_text"});
+  }
+
+  Request IncompatibleText = makeRequest(
+      {makeInput(InputKind::LlvmTextIr,
+                 withLegacyTextHeader(
+                     makeTextIr("bad-text-layout", "bad_text_layout",
+                                std::nullopt),
+                     "e-p:32:32-i64:64-n32"))},
+      {"bad_text_layout"});
+  requireFailure(IncompatibleText, Stage::BitcodeLink);
+
   Request InvalidText = makeRequest(
       {makeInput(InputKind::LlvmTextIr,
                  std::vector<uint8_t>{'n', 'o', 't', ' ', 'i', 'r'})},
@@ -2094,8 +2160,8 @@ int main(int ArgumentCount, char **Arguments) {
 
   std::vector<uint8_t> WrongMetadataTarget =
       PublicationResponse.LinkedOutput->Bytes;
-  replaceMetadataText(WrongMetadataTarget, "amdgcn-amd-amdhsa--gfx942:xnack-",
-                      "amdgcn-amd-amdhsa--gfx942:xnack+");
+  replaceMetadataText(WrongMetadataTarget, "amdgpu9.42-amd-amdhsa-unknown-gfx942:xnack-",
+                      "amdgpu9.42-amd-amdhsa-unknown-gfx942:xnack+");
   requireInspectionFailure(WrongMetadataTarget, PublicationKernel,
                            "post_link.check=metadata_target status=failed");
 

@@ -33,12 +33,13 @@ void initialize() {
 }
 Input fixedInput(bool MissingLaunch = false, bool WrongCpu = false) {
   LLVMContext Context; Module M("inert-gfx950-one-stop", Context);
-  Triple TripleValue("amdgcn-amd-amdhsa"); std::string Diagnostic;
-  const Target *T = TargetRegistry::lookupTarget("amdgcn", TripleValue, Diagnostic);
+  // LLVM 24: subarch triple, looked up by triple (the by-name overload drops it).
+  Triple TripleValue("amdgpu9.50-amd-amdhsa"); std::string Diagnostic;
+  const Target *T = TargetRegistry::lookupTarget(TripleValue, Diagnostic);
   require(T != nullptr, Diagnostic);
   TargetOptions Options;
   std::unique_ptr<TargetMachine> Machine(T->createTargetMachine(
-      TripleValue, "gfx950", "-xnack,-wavefrontsize32,+wavefrontsize64",
+      TripleValue, "gfx950", "-wavefrontsize32,+wavefrontsize64",
       Options, Reloc::PIC_, CodeModel::Small, CodeGenOptLevel::None));
   require(Machine != nullptr, "gfx950 TargetMachine unavailable");
   M.setTargetTriple(TripleValue); M.setDataLayout(Machine->createDataLayout());

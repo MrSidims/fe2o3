@@ -28,6 +28,8 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
+#include "llvm/TargetParser/AMDGPUTargetParser.h"
+#include "llvm/TargetParser/Triple.h"
 
 #include <algorithm>
 #include <array>
@@ -55,7 +57,7 @@ using namespace llvm::object;
 
 namespace {
 
-constexpr StringLiteral TripleName = "amdgcn-amd-amdhsa";
+constexpr StringLiteral TripleName = "amdgpu9.42-amd-amdhsa";
 template <size_t N>
 constexpr StringRef nulTerminatedDomain(const char (&Value)[N]) {
   return StringRef(Value, N - 1);
@@ -131,7 +133,7 @@ std::unique_ptr<TargetMachine> createMachine() {
   Triple TripleValue(TripleName);
   std::string LookupError;
   const Target *TargetValue =
-      TargetRegistry::lookupTarget("amdgcn", TripleValue, LookupError);
+      TargetRegistry::lookupTarget(TripleValue, LookupError);
   require(TargetValue != nullptr, LookupError);
   TargetOptions Options;
   std::unique_ptr<TargetMachine> Result(TargetValue->createTargetMachine(
@@ -1045,18 +1047,17 @@ std::vector<DecodedSite> decodeSymbolSites(ArrayRef<uint8_t> Payload,
   Triple TripleValue(TripleName);
   std::string LookupError;
   const Target *TargetValue =
-      TargetRegistry::lookupTarget("amdgcn", TripleValue, LookupError);
+      TargetRegistry::lookupTarget(TripleValue, LookupError);
   require(TargetValue != nullptr, LookupError);
   std::unique_ptr<MCRegisterInfo> Registers(
       TargetValue->createMCRegInfo(TripleValue));
   std::unique_ptr<MCInstrInfo> Instructions(TargetValue->createMCInstrInfo());
   std::unique_ptr<MCSubtargetInfo> Subtarget(
-      TargetValue->createMCSubtargetInfo(TripleValue, "gfx942", "-xnack"));
+      TargetValue->createMCSubtargetInfo(TripleValue, "gfx942", ""));
   MCTargetOptions Options;
   std::unique_ptr<MCAsmInfo> AsmInfo(
       TargetValue->createMCAsmInfo(*Registers, TripleValue, Options));
-  MCContext Context(TripleValue, AsmInfo.get(), Registers.get(),
-                    Subtarget.get(), nullptr, &Options);
+  MCContext Context(TripleValue, *AsmInfo, *Registers, *Subtarget);
   std::unique_ptr<MCDisassembler> Disassembler(
       TargetValue->createMCDisassembler(*Subtarget, Context));
   require(Registers && Instructions && Subtarget && AsmInfo && Disassembler,
@@ -1249,15 +1250,17 @@ void exactDynamicSymbolicDeclarationIsAccepted() {
 }
 
 void targetEnvelopeRejectsAlternatives() {
-  constexpr StringLiteral MetadataTarget = "amdgcn-amd-amdhsa--gfx942:xnack-";
+  constexpr StringLiteral MetadataTarget =
+      "amdgpu9.42-amd-amdhsa-unknown-gfx942:xnack-";
   require(matchesPhysicalMachineEffectMetadataTargetV1(MetadataTarget),
           "production metadata target was rejected");
   for (StringRef Rejected : {
-           StringRef("amdgcn-amd-amdhsa--gfx942"),
-           StringRef("amdgcn-amd-amdhsa--gfx942:xnack+"),
-           StringRef("amdgcn-amd-amdhsa--gfx942:xnack?"),
-           StringRef("amdgcn-amd-amdhsa--gfx942:xnack-:xnack-"),
-           StringRef("amdgcn-amd-amdhsa--gfx942:sramecc-:xnack-"),
+           StringRef("amdgcn-amd-amdhsa--gfx942:xnack-"),
+           StringRef("amdgpu9.42-amd-amdhsa-unknown-gfx942"),
+           StringRef("amdgpu9.42-amd-amdhsa-unknown-gfx942:xnack+"),
+           StringRef("amdgpu9.42-amd-amdhsa-unknown-gfx942:xnack?"),
+           StringRef("amdgpu9.42-amd-amdhsa-unknown-gfx942:xnack-:xnack-"),
+           StringRef("amdgpu9.42-amd-amdhsa-unknown-gfx942:sramecc-:xnack-"),
        })
     require(!matchesPhysicalMachineEffectMetadataTargetV1(Rejected),
             "non-production metadata target was accepted");
@@ -1276,7 +1279,8 @@ void targetEnvelopeRejectsAlternatives() {
                   "COV5 HSACO was accepted");
 
   std::vector<uint8_t> Malformed = finalize(makeKernelBitcode(false));
-  replaceText(Malformed, MetadataTarget, "amdgcn-amd-amdhsa--gfx942:xnack?");
+  replaceText(Malformed, MetadataTarget,
+              "amdgpu9.42-amd-amdhsa-unknown-gfx942:xnack?");
   RequireRejected(std::move(Malformed),
                   "malformed metadata target was accepted");
 }

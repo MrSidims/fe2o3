@@ -401,3 +401,16 @@ fn slice_helper_abi_keeps_result_and_call_validation_closed() {
         }
     }
 }
+
+#[test]
+fn mlir_v1_shared_slice_helpers_match_the_textual_emitter() {
+    use crate::mlir_differential_v1::{BOTH_TARGETS, assert_equivalent, exact};
+    for target in BOTH_TARGETS {
+        for (name, module) in [
+            ("slice_forwarding", forwarding_module()),
+            ("slice_loop", loop_module()),
+        ] {
+            assert_equivalent(name, &exact(module, target), target);
+        }
+    }
+}

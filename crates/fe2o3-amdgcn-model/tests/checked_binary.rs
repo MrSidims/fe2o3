@@ -1327,3 +1327,18 @@ fn upstream_llvm_verifies_optimizes_and_codegen_lowers_all_33_checked_cases() {
     );
     assert_checked_object(&toolchain, &object.stdout, &cases);
 }
+
+#[path = "support/mlir_differential_v1.rs"]
+mod mlir_differential_v1;
+
+#[test]
+fn mlir_v1_checked_arithmetic_matches_the_textual_emitter() {
+    use mlir_differential_v1::{BOTH_TARGETS, assert_equivalent, exact};
+    for target in BOTH_TARGETS {
+        assert_equivalent(
+            "checked_all",
+            &exact(checked_module(&all_checked_cases()), target),
+            target,
+        );
+    }
+}

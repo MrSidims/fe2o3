@@ -144,3 +144,18 @@ fn semantically_invalid_unary_inputs_fail_kernel_ir_verification() {
         )));
     }
 }
+
+#[path = "support/mlir_differential_v1.rs"]
+mod mlir_differential_v1;
+
+#[test]
+fn mlir_v1_unary_operations_match_the_textual_emitter() {
+    use mlir_differential_v1::{BOTH_TARGETS, assert_equivalent, exact};
+    for target in BOTH_TARGETS {
+        assert_equivalent(
+            "unary",
+            &exact(unary_module(&SUPPORTED_UNARY_CASES), target),
+            target,
+        );
+    }
+}

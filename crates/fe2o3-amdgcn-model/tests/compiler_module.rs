@@ -173,6 +173,23 @@ fn compiler_module() -> Module {
     module
 }
 
+/// [`compiler_module`] without its import: `public_adjust` calls `scale` instead of
+/// `external_bias`. The worker's corpus mode links only closures without imports, so this is the
+/// multi-kernel module it compares end to end.
+fn self_contained_compiler_module() -> Module {
+    let mut module = compiler_module();
+    module
+        .functions
+        .retain(|function| function.id != FunctionId::new("external_bias"));
+    let public_adjust = module
+        .functions
+        .iter_mut()
+        .find(|function| function.id == FunctionId::new("public_adjust"))
+        .unwrap();
+    public_adjust.body.as_mut().unwrap().blocks[0].operations[0] = call(1, "scale", 0);
+    module
+}
+
 fn helper_workgroup_geometry_module(kinds: &[IndexKind]) -> Module {
     let operations = kinds
         .iter()
@@ -974,3 +991,43 @@ mod ordinary_helper_results_v1;
 
 #[path = "compiler_module/counted_private_alloca_v1.rs"]
 mod counted_private_alloca_v1;
+
+#[path = "support/mlir_differential_v1.rs"]
+mod mlir_differential_v1;
+
+#[test]
+fn mlir_v1_compiler_modules_match_the_textual_emitter() {
+    use mlir_differential_v1::{BOTH_TARGETS, assert_equivalent, exact};
+    for target in BOTH_TARGETS {
+        assert_equivalent("compiler_module", &exact(compiler_module(), target), target);
+        assert_equivalent(
+            "self_contained_compiler_module",
+            &exact(self_contained_compiler_module(), target),
+            target,
+        );
+        assert_equivalent(
+            "helper_workgroup_geometry",
+            &exact(
+                helper_workgroup_geometry_module(&[
+                    IndexKind::Workgroup,
+                    IndexKind::WorkgroupSize,
+                    IndexKind::WorkgroupCount,
+                ]),
+                target,
+            ),
+            target,
+        );
+        // CDNA targets are wave64-only, and with wave32 opt -O3 deletes the kernel on both
+        // paths; keep the recursive SCC and branch-phi shape with the native wave width.
+        let mut wave64 = effective_wave_module();
+        for kernel in &mut wave64.kernels {
+            kernel
+                .required_capabilities
+                .remove(&TargetCapability::WaveWidth(WaveWidth::Wave32));
+            kernel
+                .required_capabilities
+                .insert(TargetCapability::WaveWidth(WaveWidth::Wave64));
+        }
+        assert_equivalent("effective_wave64", &exact(wave64, target), target);
+    }
+}

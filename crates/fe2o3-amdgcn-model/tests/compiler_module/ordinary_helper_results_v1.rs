@@ -506,3 +506,18 @@ fn emitted_multi_result_joins_loops_returns_and_maximum_width_pass_llvm_as() {
         }
     }
 }
+
+#[test]
+fn mlir_v1_ordinary_helper_results_match_the_textual_emitter() {
+    use crate::mlir_differential_v1::{BOTH_TARGETS, assert_equivalent, exact};
+    for target in BOTH_TARGETS {
+        for (name, module) in [
+            ("pair", pair_module()),
+            ("loop", loop_module()),
+            ("multiple_return", multiple_return_module()),
+            ("width_256", width_module(256)),
+        ] {
+            assert_equivalent(name, &exact(module, target), target);
+        }
+    }
+}

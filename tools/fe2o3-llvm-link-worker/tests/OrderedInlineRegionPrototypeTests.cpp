@@ -60,7 +60,7 @@ using namespace llvm;
 
 namespace {
 
-constexpr StringLiteral TripleName = "amdgcn-amd-amdhsa";
+constexpr StringLiteral TripleName = "amdgpu9.42-amd-amdhsa";
 constexpr StringLiteral KernelName = "ordered_region_fixture";
 constexpr size_t FixtureByteLimit = 64 * 1024;
 constexpr size_t PayloadByteLimit = 1024 * 1024;
@@ -191,11 +191,11 @@ std::unique_ptr<TargetMachine> createMachine() {
   Triple TripleValue(TripleName);
   std::string Diagnostic;
   const Target *TargetValue =
-      TargetRegistry::lookupTarget("amdgcn", TripleValue, Diagnostic);
+      TargetRegistry::lookupTarget(TripleValue, Diagnostic);
   require(TargetValue != nullptr, Diagnostic);
   TargetOptions Options;
   std::unique_ptr<TargetMachine> Machine(TargetValue->createTargetMachine(
-      TripleValue, "gfx942", "-xnack,-wavefrontsize32,+wavefrontsize64", Options,
+      TripleValue, "gfx942", "-wavefrontsize32,+wavefrontsize64", Options,
       Reloc::PIC_, CodeModel::Small, CodeGenOptLevel::None));
   require(Machine != nullptr, "cannot create pinned gfx942 machine");
   return Machine;
@@ -217,10 +217,10 @@ Input makeFixture(Fixture Kind) {
   if (Kind == Fixture::ModuleOnly) {
     // Deliberately no LLVM Function/launch contract. The existing worker must
     // reject this public assembly label as a compiler-module export.
-    ModuleValue.setModuleInlineAsm(
+    ModuleValue.setModuleInlineAsm(Module::GlobalAsmFragment(StringRef(
         ".text\n.p2align 8\n.globl ordered_region_fixture\n"
         ".type ordered_region_fixture,@function\nordered_region_fixture:\n"
-        "s_endpgm\n.size ordered_region_fixture,.-ordered_region_fixture\n");
+        "s_endpgm\n.size ordered_region_fixture,.-ordered_region_fixture\n")));
   } else {
     Type *I32 = Type::getInt32Ty(Context);
     Type *GlobalPointer = PointerType::get(Context, 1);
@@ -378,7 +378,7 @@ void checkInspectionDiagnostics(ArrayRef<std::string> Diagnostics,
     Unresolved += Text == "post_link.check=unresolved status=ok symbols=[]";
     Metadata += Text ==
         "post_link.check=metadata status=ok kernels=1 "
-        "target=amdgcn-amd-amdhsa--gfx942%3Axnack-";
+        "target=amdgpu9.42-amd-amdhsa-unknown-gfx942%3Axnack-";
     Kernels += Text.starts_with(
                    "post_link.kernel name=" + Symbol.str() + " symbol=" +
                    Symbol.str() + ".kd ") &&

@@ -48,7 +48,7 @@ std::optional<FixtureMetadata> fixtureMetadata(ArrayRef<uint8_t> Payload,StringR
   AMDGPU::HSAMD::V3::MetadataVerifier Verifier(true);
   if(!Verifier.verify(RootNode) || !RootNode.isMap()) return std::nullopt;
   auto &Root=RootNode.getMap();
-  if(fixtureString(Root,"amdhsa.target")!=std::optional<StringRef>("amdgcn-amd-amdhsa--gfx950:xnack-"))
+  if(fixtureString(Root,"amdhsa.target")!=std::optional<StringRef>("amdgpu9.50-amd-amdhsa-unknown-gfx950:xnack-"))
     return std::nullopt;
   auto K=Root.find("amdhsa.kernels");
   if(K==Root.end() || !K->second.isArray() || K->second.getArray().size()!=1 ||

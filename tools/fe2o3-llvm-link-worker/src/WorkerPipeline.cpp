@@ -1,6 +1,7 @@
 #include "WorkerPipeline.h"
 #include "WorkerDeviceLibraryPolicy.h"
 #include "WorkerLldPolicy.h"
+#include "WorkerMlirInput.h"
 
 #include "lld/Common/Driver.h"
 #include "llvm/ADT/STLExtras.h"
@@ -44,6 +45,8 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Support/SHA256.h"
 #include "llvm/Support/TargetSelect.h"
+#include "llvm/TargetParser/AMDGPUTargetParser.h"
+#include "llvm/TargetParser/Triple.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
@@ -82,7 +85,10 @@ constexpr StringLiteral LlvmBuildIdentity = FE2O3_LLVM_BUILD_ID;
 constexpr StringLiteral WorkerBuildIdentity = FE2O3_WORKER_BUILD_ID;
 constexpr StringLiteral UnauthenticatedTestWorkerIdentity =
     "fe2o3-unauthenticated-test-device-library-policy";
-constexpr StringLiteral AmdGpuTriple = "amdgcn-amd-amdhsa";
+// Legacy (pre-LLVM 24) AMDHSA triple without a subarch. Inputs that still
+// carry it (fe2o3 textual lowering, measured device libraries) are accepted and
+// re-targeted to the processor's subarch triple before codegen.
+constexpr StringLiteral LegacyAmdGpuTriple = "amdgcn-amd-amdhsa";
 constexpr char LldInvocationDomainV1[] =
     "FE2O3/UPSTREAM-LLD-ELF-INVOCATION/V1\0";
 
@@ -156,19 +162,25 @@ TargetParts parseTarget(StringRef Target) {
   return Result;
 }
 
-std::string targetMachineFeatures(const TargetParts &Parts) {
-  SmallString<32> Features;
-  auto Append = [&](StringRef Name, std::optional<bool> Enabled) {
-    if (!Enabled)
-      return;
-    if (!Features.empty())
-      Features.push_back(',');
-    Features.push_back(*Enabled ? '+' : '-');
-    Features.append(Name);
-  };
-  Append("sramecc", Parts.SramEcc);
-  Append("xnack", Parts.Xnack);
-  return Features.str().str();
+// LLVM 24 deprecates AMDGPU codegen without a subarch in the target triple
+// (AMDGPUAsmPrinter::doInitialization); gfx942 maps to amdgpu9.42-amd-amdhsa.
+Triple amdgpuTriple(StringRef Cpu) {
+  Triple Result(LegacyAmdGpuTriple);
+  Triple::SubArchType SubArch =
+      AMDGPU::getSubArch(AMDGPU::parseArchAMDGCN(Cpu));
+  if (SubArch != Triple::NoSubArch)
+    Result.setArch(Triple::amdgpu, SubArch);
+  return Result;
+}
+
+// LLVM 24 prints the code-object target ID from the four-component normalized
+// triple (AMDGPU::TargetID), e.g. amdgpu9.42-amd-amdhsa-unknown-gfx942:xnack-.
+std::string expectedMetadataTarget(StringRef Target) {
+  TargetParts Parts = parseTarget(Target);
+  return (Twine(amdgpuTriple(Parts.Cpu).normalize(
+              Triple::CanonicalForm::FOUR_IDENT)) +
+          "-" + Target)
+      .str();
 }
 
 uint32_t expectedGfx942Flags(const TargetParts &Parts) {
@@ -230,6 +242,15 @@ Error validateRequest(const Request &RequestValue) {
                        [](uint8_t Byte) { return Byte == 0 || Byte > 0x7f; }))
         return pipelineError(Twine("input ") + Twine(I) +
                              " has noncanonical textual LLVM IR bytes");
+      continue;
+    case InputKind::MlirLlvmText:
+      if (!mlirLlvmTextInputSupported())
+        return pipelineError(Twine("input ") + Twine(I) +
+                             " is MLIR, which this worker build refuses");
+      if (llvm::any_of(InputValue.Bytes,
+                       [](uint8_t Byte) { return Byte == 0 || Byte > 0x7f; }))
+        return pipelineError(Twine("input ") + Twine(I) +
+                             " has noncanonical textual MLIR bytes");
       continue;
     default:
       return pipelineError(Twine("input ") + Twine(I) +
@@ -303,14 +324,18 @@ createMachine(const Request &RequestValue) {
   }();
   (void)Initialized;
 
-  Triple TripleValue(AmdGpuTriple);
+  TargetParts Parts = parseTarget(RequestValue.Target);
+  Triple TripleValue = amdgpuTriple(Parts.Cpu);
   std::string LookupError;
+  // Look up by triple: the by-name overload resets the arch to plain amdgpu and
+  // drops the subarch on LLVM 24.
   const Target *TargetValue =
-      TargetRegistry::lookupTarget("amdgcn", TripleValue, LookupError);
+      TargetRegistry::lookupTarget(TripleValue, LookupError);
   if (!TargetValue)
     return pipelineError(Twine("AMDGPU target lookup failed: ") + LookupError);
-  TargetParts Parts = parseTarget(RequestValue.Target);
-  std::string Features = targetMachineFeatures(Parts);
+  // xnack/sramecc travel only as amdgpu.* module flags on LLVM 24; the
+  // AsmPrinter rejects them in the target-machine feature string.
+  std::string Features;
   TargetOptions OptionsValue;
   std::unique_ptr<TargetMachine> Machine(TargetValue->createTargetMachine(
       TripleValue, Parts.Cpu, Features, OptionsValue, Reloc::PIC_,
@@ -330,8 +355,11 @@ Error setAndCheckModuleContract(Module &ModuleValue,
       MeasuredBuiltinProvider && ExistingTriple.isAMDGCN() &&
       ExistingTriple.getVendor() == Triple::AMD &&
       ExistingTriple.getOS() == Triple::AMDHSA;
+  const std::string ExistingNormalized =
+      Triple::normalize(ExistingTriple.getTriple());
   if (!ExistingTriple.getTriple().empty() &&
-      Triple::normalize(ExistingTriple.getTriple()) != AmdGpuTriple &&
+      ExistingNormalized != LegacyAmdGpuTriple &&
+      ExistingNormalized != Machine.getTargetTriple().str() &&
       !CompatibleMeasuredProviderTriple)
     return pipelineError("bitcode target triple does not match AMDHSA");
   if (!ModuleValue.getDataLayoutStr().empty() &&
@@ -359,7 +387,7 @@ Error setAndCheckModuleContract(Module &ModuleValue,
           ConstantAsMetadata::get(ConstantInt::get(Constant->getType(), 600)));
     }
   }
-  ModuleValue.setTargetTriple(Triple(AmdGpuTriple));
+  ModuleValue.setTargetTriple(Machine.getTargetTriple());
   ModuleValue.setDataLayout(Machine.createDataLayout());
   if (!ExistingCodeObject)
     ModuleValue.addModuleFlag(Module::Error, "amdhsa_code_object_version",
@@ -392,7 +420,7 @@ Error setAndCheckModuleContract(Module &ModuleValue,
   if (MeasuredBuiltinProvider)
     return Error::success();
 
-  for (const Function &FunctionValue : ModuleValue) {
+  for (Function &FunctionValue : ModuleValue) {
     Attribute Cpu = FunctionValue.getFnAttribute("target-cpu");
     if (Cpu.isStringAttribute() && Cpu.getValueAsString() != Parts.Cpu)
       return pipelineError(Twine("bitcode function '") +
@@ -424,9 +452,9 @@ Error setAndCheckModuleContract(Module &ModuleValue,
         continue;
       }
       ArrayRef<SubtargetFeatureKV> KnownFeatures =
-          Machine.getMCSubtargetInfo()->getAllProcessorFeatures();
+          Machine.getMCSubtargetInfo().getAllProcessorFeatures();
       auto Known = llvm::lower_bound(KnownFeatures, Name);
-      if (Known == KnownFeatures.end() || StringRef(Known->Key) != Name)
+      if (Known == KnownFeatures.end() || StringRef(Known->key()) != Name)
         return pipelineError(Twine("bitcode function '") +
                              FunctionValue.getName() +
                              "' names an unknown target feature");
@@ -435,12 +463,46 @@ Error setAndCheckModuleContract(Module &ModuleValue,
       CheckedFeatures.append(Feature);
     }
     if (!CheckedFeatures.empty() &&
-        !Machine.getMCSubtargetInfo()->checkFeatures(CheckedFeatures))
+        !Machine.getMCSubtargetInfo().checkFeatures(CheckedFeatures))
       return pipelineError(Twine("bitcode function '") +
                            FunctionValue.getName() +
                            "' target features are incompatible with target");
+    // LLVM 24 no longer recognizes xnack/sramecc as subtarget features. Their
+    // request-checked value is carried by the amdgpu.* module flags above, so
+    // drop the verified legacy tokens instead of feeding ignored features on.
+    if (StringRef(CheckedFeatures) != Features.getValueAsString()) {
+      if (CheckedFeatures.empty())
+        FunctionValue.removeFnAttr("target-features");
+      else
+        FunctionValue.addFnAttr("target-features", CheckedFeatures);
+    }
   }
   return Error::success();
+}
+
+bool isLlvmModuleInput(InputKind Kind) {
+  return Kind == InputKind::LlvmBitcode || Kind == InputKind::LlvmTextIr ||
+         Kind == InputKind::MlirLlvmText;
+}
+
+/// Translates an MLIR input into the same position a parsed textual module
+/// takes: the layout admission callback sees the module's triple and layout
+/// before translation and its answer becomes the layout translation starts
+/// from, exactly as LLParser applies it before reading the body (default
+/// load, store and alloca alignments come from that layout).
+Expected<std::unique_ptr<Module>>
+translateMlirModuleInput(StringRef Bytes, StringRef InputName,
+                         LLVMContext &Context,
+                         MlirLayoutAdmission AdmitLayout) {
+  auto Translated =
+      translateMlirLlvmTextInput(Bytes, InputName, Context, AdmitLayout);
+  if (!Translated)
+    return Translated.takeError();
+  // Same attribute upgrade the textual path applies, so legacy attribute
+  // strings carried through `passthrough` reach codegen in their LLVM 24 form.
+  for (Function &FunctionValue : **Translated)
+    UpgradeFunctionAttributes(FunctionValue);
+  return std::move(*Translated);
 }
 
 Expected<std::unique_ptr<Module>>
@@ -448,35 +510,44 @@ parseModuleInput(const Input &InputValue, StringRef InputName,
                  const Request &RequestValue, LLVMContext &Context,
                  const TargetMachine &Machine,
                  bool MeasuredBuiltinProvider = false) {
-  if (InputValue.Kind != InputKind::LlvmBitcode &&
-      InputValue.Kind != InputKind::LlvmTextIr)
+  if (!isLlvmModuleInput(InputValue.Kind))
     return pipelineError(Twine(InputName) + " is not an LLVM module");
   StringRef Bytes(reinterpret_cast<const char *>(InputValue.Bytes.data()),
                   InputValue.Bytes.size());
   DataLayout ExpectedLayout = Machine.createDataLayout();
   bool AcceptedLayout = false;
-  ParserCallbacks Callbacks([&](StringRef TripleValue, StringRef Layout) {
+  // Bitcode and textual IR share one layout admission rule: an absent layout,
+  // or a layout whose LLVM auto-upgrade is structurally equal to the target
+  // machine layout. BitcodeReader applies UpgradeDataLayoutString before this
+  // callback; LLParser does not, so it is applied here (idempotently). This
+  // admits pre-LLVM-24 AMDGPU spellings (no m:e, no p10-p15) without editing
+  // the emitted module bytes.
+  auto AdmitLayout = [&](StringRef TripleValue, StringRef Layout) {
     std::string InferredAbsent = UpgradeDataLayoutString("", TripleValue);
-    if (Layout == InferredAbsent) {
+    if (Layout.empty() || Layout == InferredAbsent) {
       AcceptedLayout = true;
     } else {
-      auto ParsedLayout = DataLayout::parse(Layout);
+      auto ParsedLayout =
+          DataLayout::parse(UpgradeDataLayoutString(Layout, TripleValue));
       if (ParsedLayout)
         AcceptedLayout = *ParsedLayout == ExpectedLayout;
       else
         consumeError(ParsedLayout.takeError());
     }
     return std::optional<std::string>(ExpectedLayout.getStringRepresentation());
-  });
+  };
+  ParserCallbacks Callbacks(AdmitLayout);
   Expected<std::unique_ptr<Module>> Parsed =
       [&]() -> Expected<std::unique_ptr<Module>> {
     if (InputValue.Kind == InputKind::LlvmBitcode)
       return parseBitcodeFile(MemoryBufferRef(Bytes, InputName), Context,
                               std::move(Callbacks));
+    if (InputValue.Kind == InputKind::MlirLlvmText)
+      return translateMlirModuleInput(Bytes, InputName, Context, AdmitLayout);
     SMDiagnostic Diagnostic;
     auto TextBuffer = MemoryBuffer::getMemBufferCopy(Bytes, InputName);
-    auto TextModule =
-        parseAssembly(TextBuffer->getMemBufferRef(), Diagnostic, Context);
+    auto TextModule = parseAssembly(TextBuffer->getMemBufferRef(), Diagnostic,
+                                    Context, nullptr, AdmitLayout);
     if (!TextModule) {
       std::string Message;
       raw_string_ostream Stream(Message);
@@ -485,9 +556,12 @@ parseModuleInput(const Input &InputValue, StringRef InputName,
       return pipelineError(Twine("textual LLVM IR input ") + InputName + ": " +
                            Message);
     }
-    StringRef ObservedLayout = TextModule->getDataLayoutStr();
-    AcceptedLayout = ObservedLayout.empty() ||
-                     TextModule->getDataLayout() == ExpectedLayout;
+    // BitcodeReader upgrades legacy function attributes (for example the
+    // pre-LLVM-24 "denormal-fp-math[-f32]" strings into denormal_fpenv);
+    // LLParser does not. Apply the same upgrade so a textual module and its
+    // bitcode encoding reach codegen with identical semantics.
+    for (Function &FunctionValue : *TextModule)
+      UpgradeFunctionAttributes(FunctionValue);
     return TextModule;
   }();
   if (!Parsed)
@@ -569,8 +643,7 @@ Expected<std::unique_ptr<Module>> linkBitcode(const Request &RequestValue,
   std::unique_ptr<Module> Linked;
   for (size_t I = 0; I < RequestValue.Inputs.size(); ++I) {
     const Input &InputValue = RequestValue.Inputs[I];
-    if (InputValue.Kind != InputKind::LlvmBitcode &&
-        InputValue.Kind != InputKind::LlvmTextIr)
+    if (!isLlvmModuleInput(InputValue.Kind))
       continue;
     std::string InputName = (Twine("<bitcode-input-") + Twine(I) + ">").str();
     auto Parsed =
@@ -646,7 +719,7 @@ Error optimizeModule(Module &ModuleValue, const Request &RequestValue,
     }
   if (!PreservedExports.empty())
     appendToUsed(ModuleValue, PreservedExports);
-  PassBuilder Builder(&Machine);
+  PassBuilder Builder(ModuleValue.getContext(), &Machine);
   LoopAnalysisManager Loops;
   FunctionAnalysisManager Functions;
   CGSCCAnalysisManager Cgscc;
@@ -984,6 +1057,8 @@ Expected<SymbolContract> inspectModuleSymbols(const Input &InputValue,
       [&]() -> Expected<std::unique_ptr<Module>> {
     if (InputValue.Kind == InputKind::LlvmBitcode)
       return parseBitcodeFile(MemoryBufferRef(Bytes, InputName), Context);
+    if (InputValue.Kind == InputKind::MlirLlvmText)
+      return translateMlirLlvmTextInput(Bytes, InputName, Context);
     SMDiagnostic Diagnostic;
     auto TextBuffer = MemoryBuffer::getMemBufferCopy(Bytes, InputName);
     auto TextModule =
@@ -1090,8 +1165,7 @@ inspectNormalizedCompilerModule(const Request &RequestValue,
 
 Expected<SymbolContract> inspectInputSymbols(const Input &InputValue,
                                              StringRef InputName) {
-  if (InputValue.Kind == InputKind::LlvmBitcode ||
-      InputValue.Kind == InputKind::LlvmTextIr)
+  if (isLlvmModuleInput(InputValue.Kind))
     return inspectModuleSymbols(InputValue, InputName);
   auto Elf = inspectRelocatable(InputValue.Bytes);
   if (!Elf)
@@ -1692,7 +1766,7 @@ inspectOutput(ArrayRef<uint8_t> Bytes, const ElfContract &Expected,
     return postLinkError("metadata", errorToDiagnostic(Metadata.takeError()));
   if (Metadata->Present) {
     std::string ExpectedMetadataTarget =
-        (Twine(AmdGpuTriple) + "--" + RequestValue.Target).str();
+        expectedMetadataTarget(RequestValue.Target);
     if (!Metadata->Target || *Metadata->Target != ExpectedMetadataTarget)
       return postLinkError(
           "metadata_target",

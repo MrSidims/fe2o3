@@ -9,7 +9,12 @@ use crate::{
     messagepack::{ValueRef, decode_bounded},
 };
 
-const TARGET_PREFIX: &str = "amdgcn-amd-amdhsa--";
+/// Pre-LLVM-24 code-object target-ID prefix (`amdgcn-amd-amdhsa--<target-id>`).
+const LEGACY_TARGET_PREFIX: &str = "amdgcn-amd-amdhsa--";
+/// LLVM 24 spells the code-object target ID from the four-component normalized
+/// subarch triple: `amdgpu<major>.<minor>-amd-amdhsa-unknown-<target-id>`.
+const SUBARCH_TARGET_ARCH_PREFIX: &str = "amdgpu";
+const SUBARCH_TARGET_TRIPLE_SUFFIX: &str = "-amd-amdhsa-unknown-";
 const MAX_ENTRY_NAME_BYTES: usize = 256;
 const MAX_SEGMENT_BYTES: u64 = 0xffff_ffff;
 
@@ -20,6 +25,32 @@ struct ParsedArguments {
     hidden: Vec<HiddenArgument>,
     implicit_offset: Option<u64>,
     implicit_size: u64,
+}
+
+/// Splits `amdhsa.target` into the target ID and, for the LLVM 24 spelling, the
+/// triple subarch. Both spellings name the same code object; the ELF `e_flags`
+/// check below remains the binding identity.
+fn split_target_text(text: &str) -> Result<(&str, Option<&str>), InspectionError> {
+    if let Some(target_id) = text.strip_prefix(LEGACY_TARGET_PREFIX) {
+        return Ok((target_id, None));
+    }
+    let (subarch, target_id) = text
+        .strip_prefix(SUBARCH_TARGET_ARCH_PREFIX)
+        .and_then(|rest| rest.split_once(SUBARCH_TARGET_TRIPLE_SUFFIX))
+        .ok_or(InspectionError::InvalidTargetPrefix)?;
+    Ok((target_id, Some(subarch)))
+}
+
+/// LLVM derives the subarch of concrete processor `gfx<major><xy>` as
+/// `<major>.<xy>` (gfx942 -> 9.42, gfx90a -> 9.0a, gfx1250 -> 12.50).
+fn subarch_matches_processor(subarch: &str, processor: &str) -> bool {
+    let Some(version) = processor.strip_prefix("gfx") else {
+        return false;
+    };
+    let Some(split) = version.len().checked_sub(2).filter(|split| *split > 0) else {
+        return false;
+    };
+    subarch.split_once('.') == Some((&version[..split], &version[split..]))
 }
 
 pub(crate) fn inspect_metadata(
@@ -36,12 +67,15 @@ pub(crate) fn inspect_metadata(
     validate_metadata_version(code_object_version, metadata_version)?;
 
     let target_text = expect_string(required(root, "amdhsa.target")?, "amdhsa.target")?;
-    let target_id = target_text
-        .strip_prefix(TARGET_PREFIX)
-        .ok_or(InspectionError::InvalidTargetPrefix)?;
+    let (target_id, subarch) = split_target_text(target_text)?;
     let target = AmdTargetId::parse(target_id).map_err(|_| InspectionError::InvalidTargetId)?;
     if target.to_string() != target_id {
         return Err(InspectionError::NonCanonicalTargetId);
+    }
+    if let Some(subarch) = subarch
+        && !subarch_matches_processor(subarch, target.processor())
+    {
+        return Err(InspectionError::InvalidTargetPrefix);
     }
     if target.amdhsa_elf_flags_v4_plus() != e_flags {
         return Err(InspectionError::TargetFlagsMismatch);
@@ -1125,5 +1159,59 @@ mod tests {
             Err(InspectionError::InvalidImplicitArgumentSpan)
         );
         assert_eq!(align_up(u64::MAX - 7, 8), Ok(u64::MAX - 7));
+    }
+}
+
+#[cfg(test)]
+mod target_text_tests {
+    use super::{split_target_text, subarch_matches_processor};
+    use crate::InspectionError;
+
+    #[test]
+    fn accepts_legacy_and_llvm24_spellings() {
+        assert_eq!(
+            split_target_text("amdgcn-amd-amdhsa--gfx942:xnack-"),
+            Ok(("gfx942:xnack-", None))
+        );
+        assert_eq!(
+            split_target_text("amdgpu9.42-amd-amdhsa-unknown-gfx942:xnack-"),
+            Ok(("gfx942:xnack-", Some("9.42")))
+        );
+        for rejected in [
+            "amdgcn-amd-amdhsa-gfx942:xnack-",
+            "amdgcn-amd-amdhsa-unknown-gfx942:xnack-",
+            "amdgpu-amd-amdhsa--gfx942:xnack-",
+            "amdgpu9.42-amd-amdhsa--gfx942:xnack-",
+            "gfx942:xnack-",
+        ] {
+            assert_eq!(
+                split_target_text(rejected),
+                Err(InspectionError::InvalidTargetPrefix),
+                "{rejected}"
+            );
+        }
+    }
+
+    #[test]
+    fn subarch_is_derived_from_processor() {
+        // Pairs measured from LLVM 24.0.0git (cea26e4798f7) AMDGPU::getSubArch.
+        for (processor, subarch) in [
+            ("gfx600", "6.00"),
+            ("gfx810", "8.10"),
+            ("gfx90a", "9.0a"),
+            ("gfx90c", "9.0c"),
+            ("gfx942", "9.42"),
+            ("gfx950", "9.50"),
+            ("gfx1036", "10.36"),
+            ("gfx1172", "11.72"),
+            ("gfx1250", "12.50"),
+            ("gfx1310", "13.10"),
+        ] {
+            assert!(subarch_matches_processor(subarch, processor), "{processor}");
+        }
+        assert!(!subarch_matches_processor("9.50", "gfx942"));
+        assert!(!subarch_matches_processor("9.4", "gfx942"));
+        assert!(!subarch_matches_processor("942", "gfx942"));
+        assert!(!subarch_matches_processor("", "gfx942"));
     }
 }

@@ -145,3 +145,22 @@ fn non_integral_bitwise_input_is_rejected_by_kernel_ir_verification() {
         DiagnosticCode::InvalidOperandType
     )));
 }
+
+#[path = "support/mlir_differential_v1.rs"]
+mod mlir_differential_v1;
+
+#[test]
+fn mlir_v1_bitwise_operations_match_the_textual_emitter() {
+    use mlir_differential_v1::{BOTH_TARGETS, assert_equivalent, exact};
+    let operators = BITWISE_OPERATORS.map(|(operator, _)| operator);
+    for target in BOTH_TARGETS {
+        assert_equivalent(
+            "bitwise",
+            &exact(
+                bitwise_module(&SUPPORTED_BITWISE_SCALARS, &operators),
+                target,
+            ),
+            target,
+        );
+    }
+}

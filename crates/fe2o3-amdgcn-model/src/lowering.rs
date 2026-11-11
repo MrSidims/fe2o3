@@ -44,6 +44,14 @@ use v12_preflight::reject_unsupported_v12_module;
 mod checked_load_grouping_v1;
 pub use checked_load_grouping_v1::lower_compiler_module_to_gfx950_xnack_minus_llvm_ir_with_checked_load_grouping_v1;
 
+#[path = "lowering/mlir_text_v1.rs"]
+mod mlir_text_v1;
+use mlir_text_v1::CompilerModuleEmitterV1;
+pub use mlir_text_v1::{
+    lower_compiler_module_to_gfx942_xnack_minus_mlir_v1,
+    lower_compiler_module_to_gfx950_xnack_minus_mlir_v1,
+};
+
 #[path = "lowering/wave64_helper_context_v1.rs"]
 mod wave64_helper_context_v1;
 
@@ -1290,6 +1298,36 @@ fn lower_compiler_module_with_checked_load_context_v1(
     debug_line: Option<OrderedProgramDebugLineV17<'_>>,
     checked_load_grouping_v1: bool,
 ) -> Result<String, LoweringErrors> {
+    lower_compiler_module_with_emitter_v1(
+        module,
+        target,
+        launch_policies,
+        semantic_anchor_identity,
+        require_kernel,
+        ordered_owner,
+        physical,
+        bf16_context,
+        debug_line,
+        checked_load_grouping_v1,
+        CompilerModuleEmitterV1::LlvmIr,
+    )
+}
+
+/// Shared preflight for every compiler-module renderer; `emitter` picks only the final text form.
+#[allow(clippy::too_many_arguments)]
+fn lower_compiler_module_with_emitter_v1(
+    module: &Module,
+    target: LoweringTarget,
+    launch_policies: Option<&[Gfx942KernelLaunchPolicyV1]>,
+    semantic_anchor_identity: Option<SemanticAnchorInputV1<'_>>,
+    require_kernel: bool,
+    ordered_owner: Option<OrderedModuleOwner<'_>>,
+    physical: Option<&CompilerPhysicalLaunchV2<'_>>,
+    bf16_context: Option<&NativeBf16HelperContextV1<'_>>,
+    debug_line: Option<OrderedProgramDebugLineV17<'_>>,
+    checked_load_grouping_v1: bool,
+    emitter: CompilerModuleEmitterV1,
+) -> Result<String, LoweringErrors> {
     if checked_load_grouping_v1
         && (target != LoweringTarget::Gfx950XnackMinusV1
             || semantic_anchor_identity.is_some()
@@ -1683,14 +1721,24 @@ fn lower_compiler_module_with_checked_load_context_v1(
         helper_lowerers.push(lowerer);
     }
 
-    emit_compiler_module(
-        module,
-        &kernel_lowerers,
-        &helper_lowerers,
-        &declarations,
-        target,
-        semantic_anchor_identity,
-    )
+    match emitter {
+        CompilerModuleEmitterV1::LlvmIr => emit_compiler_module(
+            module,
+            &kernel_lowerers,
+            &helper_lowerers,
+            &declarations,
+            target,
+            semantic_anchor_identity,
+        ),
+        CompilerModuleEmitterV1::MlirLlvmV1 => mlir_text_v1::emit_compiler_module_mlir_v1(
+            module,
+            &kernel_lowerers,
+            &helper_lowerers,
+            &declarations,
+            target,
+            semantic_anchor_identity,
+        ),
+    }
 }
 
 fn validate_launch_policies(
@@ -3126,11 +3174,14 @@ fn emit_compiler_module(
             .required_flat_workgroup_size("compiler-module kernel requires a workgroup size")?;
         match lowerer.launch_bounds {
             Some(bounds) => {
+                // Every compiler-module kernel also carries `!reqd_work_group_size`, and
+                // admission already proved `min <= flat <= max`. LLVM 24's AMDGPU verifier
+                // requires the flat range to equal the reqd product exactly, so the admitted
+                // policy range narrows to that single size; exact policies are unchanged.
+                debug_assert!(bounds.admits_flat_workgroup_size(flat_workgroup_size));
                 writeln!(
                     output,
-                    "attributes #{index} = {{ nounwind{convergence} \"amdgpu-flat-work-group-size\"=\"{},{}\" \"amdgpu-waves-per-eu\"=\"{},{}\"{wave_attribute}{} }}",
-                    bounds.minimum_flat_workgroup_size(),
-                    bounds.maximum_flat_workgroup_size(),
+                    "attributes #{index} = {{ nounwind{convergence} \"amdgpu-flat-work-group-size\"=\"{flat_workgroup_size},{flat_workgroup_size}\" \"amdgpu-waves-per-eu\"=\"{},{}\"{wave_attribute}{} }}",
                     bounds.minimum_waves_per_execution_unit(),
                     bounds.maximum_waves_per_execution_unit(),
                     target.llvm_function_attributes()

@@ -80,8 +80,9 @@ constexpr StringRef AnalyzerIdentityDomain =
     nulTerminatedDomain("FE2O3/GFX942-PHYSICAL-MACHINE-EFFECT-ANALYZER/V1\0");
 constexpr StringRef ToolchainIdentityDomain =
     nulTerminatedDomain("FE2O3/GFX942-PHYSICAL-MACHINE-EFFECT-TOOLCHAIN/V1\0");
+// LLVM 24 target ID: four-component normalized subarch triple + processor.
 constexpr StringLiteral PhysicalProfileMetadataTarget =
-    "amdgcn-amd-amdhsa--gfx942:xnack-";
+    "amdgpu9.42-amd-amdhsa-unknown-gfx942:xnack-";
 constexpr uint32_t PhysicalProfileElfFlags =
     ELF::EF_AMDGPU_MACH_AMDGCN_GFX942 | ELF::EF_AMDGPU_FEATURE_XNACK_OFF_V4 |
     ELF::EF_AMDGPU_FEATURE_SRAMECC_ANY_V4;
@@ -1115,17 +1116,17 @@ Expected<McState> createMcState() {
   }();
   (void)Initialized;
 
-  Triple TripleValue("amdgcn-amd-amdhsa");
+  Triple TripleValue("amdgpu9.42-amd-amdhsa");
   std::string LookupError;
   const Target *TargetValue =
-      TargetRegistry::lookupTarget("amdgcn", TripleValue, LookupError);
+      TargetRegistry::lookupTarget(TripleValue, LookupError);
   if (!TargetValue)
     return analysisError(Twine("AMDGPU target unavailable: ") + LookupError);
   McState Result;
   Result.Registers.reset(TargetValue->createMCRegInfo(TripleValue));
   Result.Instructions.reset(TargetValue->createMCInstrInfo());
   Result.Subtarget.reset(
-      TargetValue->createMCSubtargetInfo(TripleValue, "gfx942", "-xnack"));
+      TargetValue->createMCSubtargetInfo(TripleValue, "gfx942", ""));
   if (!Result.Registers || !Result.Instructions || !Result.Subtarget)
     return analysisError("AMDGPU MC tables are unavailable");
   MCTargetOptions Options;
@@ -1134,8 +1135,7 @@ Expected<McState> createMcState() {
   if (!Result.AsmInfo)
     return analysisError("AMDGPU MC assembly info is unavailable");
   Result.Context = std::make_unique<MCContext>(
-      TripleValue, Result.AsmInfo.get(), Result.Registers.get(),
-      Result.Subtarget.get(), nullptr, &Options);
+      TripleValue, *Result.AsmInfo, *Result.Registers, *Result.Subtarget);
   Result.Disassembler.reset(
       TargetValue->createMCDisassembler(*Result.Subtarget, *Result.Context));
   Result.Analysis.reset(
@@ -1212,10 +1212,10 @@ uint16_t supportedGlobalAtomicWidth(StringRef Name) {
   Name.consume_back("_RTN");
   bool Wide = Name.consume_back("_X2");
   bool Operation = StringSwitch<bool>(Name)
-                       .Cases("CMPSWAP", "SWAP", "ADD", true)
-                       .Cases("SUB", "AND", "OR", true)
-                       .Cases("XOR", "SMIN", "UMIN", true)
-                       .Cases("SMAX", "UMAX", true)
+                       .Cases({"CMPSWAP", "SWAP", "ADD"}, true)
+                       .Cases({"SUB", "AND", "OR"}, true)
+                       .Cases({"XOR", "SMIN", "UMIN"}, true)
+                       .Cases({"SMAX", "UMAX"}, true)
                        .Default(false);
   return Operation ? (Wide ? 8 : 4) : 0;
 }
@@ -1225,34 +1225,34 @@ uint16_t supportedDsAtomicWidth(StringRef Name) {
     return 0;
   Name.consume_back("_vi");
   return StringSwitch<uint16_t>(Name)
-      .Cases("CMPST_B32", "CMPST_RTN_B32", "WRXCHG_B32", 4)
+      .Cases({"CMPST_B32", "CMPST_RTN_B32", "WRXCHG_B32"}, 4)
       .Case("WRXCHG_RTN_B32", 4)
-      .Cases("CMPST_B64", "CMPST_RTN_B64", "WRXCHG_B64", 8)
+      .Cases({"CMPST_B64", "CMPST_RTN_B64", "WRXCHG_B64"}, 8)
       .Case("WRXCHG_RTN_B64", 8)
-      .Cases("ADD_U32", "ADD_RTN_U32", "SUB_U32", 4)
-      .Cases("SUB_RTN_U32", "RSUB_U32", "RSUB_RTN_U32", 4)
-      .Cases("ADD_U64", "ADD_RTN_U64", "SUB_U64", 8)
-      .Cases("SUB_RTN_U64", "RSUB_U64", "RSUB_RTN_U64", 8)
-      .Cases("AND_B32", "AND_RTN_B32", "OR_B32", 4)
-      .Cases("OR_RTN_B32", "XOR_B32", "XOR_RTN_B32", 4)
-      .Cases("AND_B64", "AND_RTN_B64", "OR_B64", 8)
-      .Cases("OR_RTN_B64", "XOR_B64", "XOR_RTN_B64", 8)
-      .Cases("MIN_I32", "MIN_RTN_I32", "MIN_U32", 4)
-      .Cases("MIN_RTN_U32", "MAX_I32", "MAX_RTN_I32", 4)
-      .Cases("MAX_U32", "MAX_RTN_U32", 4)
-      .Cases("MIN_I64", "MIN_RTN_I64", "MIN_U64", 8)
-      .Cases("MIN_RTN_U64", "MAX_I64", "MAX_RTN_I64", 8)
-      .Cases("MAX_U64", "MAX_RTN_U64", 8)
+      .Cases({"ADD_U32", "ADD_RTN_U32", "SUB_U32"}, 4)
+      .Cases({"SUB_RTN_U32", "RSUB_U32", "RSUB_RTN_U32"}, 4)
+      .Cases({"ADD_U64", "ADD_RTN_U64", "SUB_U64"}, 8)
+      .Cases({"SUB_RTN_U64", "RSUB_U64", "RSUB_RTN_U64"}, 8)
+      .Cases({"AND_B32", "AND_RTN_B32", "OR_B32"}, 4)
+      .Cases({"OR_RTN_B32", "XOR_B32", "XOR_RTN_B32"}, 4)
+      .Cases({"AND_B64", "AND_RTN_B64", "OR_B64"}, 8)
+      .Cases({"OR_RTN_B64", "XOR_B64", "XOR_RTN_B64"}, 8)
+      .Cases({"MIN_I32", "MIN_RTN_I32", "MIN_U32"}, 4)
+      .Cases({"MIN_RTN_U32", "MAX_I32", "MAX_RTN_I32"}, 4)
+      .Cases({"MAX_U32", "MAX_RTN_U32"}, 4)
+      .Cases({"MIN_I64", "MIN_RTN_I64", "MIN_U64"}, 8)
+      .Cases({"MIN_RTN_U64", "MAX_I64", "MAX_RTN_I64"}, 8)
+      .Cases({"MAX_U64", "MAX_RTN_U64"}, 8)
       .Default(0);
 }
 
 bool supportedDsCollectivePrimitive(StringRef Name) {
   return StringSwitch<bool>(Name)
-      .Cases("DS_READ_B32", "DS_READ_B32_vi", true)
-      .Cases("DS_WRITE_B32", "DS_WRITE_B32_vi", true)
-      .Cases("DS_BPERMUTE_B32", "DS_BPERMUTE_B32_vi", true)
-      .Cases("DS_PERMUTE_B32", "DS_PERMUTE_B32_vi", true)
-      .Cases("DS_SWIZZLE_B32", "DS_SWIZZLE_B32_vi", true)
+      .Cases({"DS_READ_B32", "DS_READ_B32_vi"}, true)
+      .Cases({"DS_WRITE_B32", "DS_WRITE_B32_vi"}, true)
+      .Cases({"DS_BPERMUTE_B32", "DS_BPERMUTE_B32_vi"}, true)
+      .Cases({"DS_PERMUTE_B32", "DS_PERMUTE_B32_vi"}, true)
+      .Cases({"DS_SWIZZLE_B32", "DS_SWIZZLE_B32_vi"}, true)
       .Default(false);
 }
 

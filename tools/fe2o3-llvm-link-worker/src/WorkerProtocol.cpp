@@ -263,8 +263,11 @@ Error validateSymbols(ArrayRef<std::string> Symbols) {
   return Error::success();
 }
 
-Expected<Input> decodeInput(Cursor &InputBytes, size_t &Total,
-                            size_t MaxTotal) {
+/// `AllowMlir` is set only for the V2 compiler-module slot: MLIR input is an
+/// engineering spelling of the compiler module, never a provider or a V1 input.
+Expected<Input> decodeInput(Cursor &InputBytes, size_t &Total, size_t MaxTotal,
+                            bool AllowMlir = false) {
+  (void)AllowMlir; // Unused when the build refuses MLIR input.
   auto KindOrError = InputBytes.byte();
   if (!KindOrError)
     return KindOrError.takeError();
@@ -275,6 +278,14 @@ Expected<Input> decodeInput(Cursor &InputBytes, size_t &Total,
     Kind = InputKind::AmdGpuRelocatable;
   else if (*KindOrError == static_cast<uint8_t>(InputKind::LlvmTextIr))
     Kind = InputKind::LlvmTextIr;
+#if FE2O3_WORKER_MLIR_INPUT
+  else if (*KindOrError == static_cast<uint8_t>(InputKind::MlirLlvmText)) {
+    if (!AllowMlir)
+      return protocolError(
+          "MLIR input is admitted only as the V2 compiler module");
+    Kind = InputKind::MlirLlvmText;
+  }
+#endif
   else
     return protocolError("unknown worker input kind");
   auto DigestBytes = InputBytes.take(32);
@@ -312,10 +323,11 @@ Error validateInputOrder(ArrayRef<Input> Inputs) {
   return Error::success();
 }
 
-Expected<Input> decodeSingleInput(ArrayRef<uint8_t> Bytes) {
+Expected<Input> decodeSingleInput(ArrayRef<uint8_t> Bytes,
+                                  bool AllowMlir = false) {
   Cursor InputBytes(Bytes);
   size_t Total = 0;
-  auto Result = decodeInput(InputBytes, Total, MaxTotalInputBytes);
+  auto Result = decodeInput(InputBytes, Total, MaxTotalInputBytes, AllowMlir);
   if (!Result)
     return Result.takeError();
   if (Error E = InputBytes.finish())
@@ -758,7 +770,7 @@ Expected<Request> decodeRequestV2(ArrayRef<uint8_t> Bytes) {
   auto ModuleBytes = Decoder.field(9, MaxTotalInputBytes + 41);
   if (!ModuleBytes)
     return ModuleBytes.takeError();
-  auto Module = decodeSingleInput(*ModuleBytes);
+  auto Module = decodeSingleInput(*ModuleBytes, /*AllowMlir=*/true);
   if (!Module)
     return Module.takeError();
   Result.CompilerModule = std::move(*Module);

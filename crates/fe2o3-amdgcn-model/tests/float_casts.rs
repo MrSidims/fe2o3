@@ -102,3 +102,24 @@ fn float_to_integer_lowering_retains_unsupported_width_diagnostics() {
         assert!(error.contains(LoweringDiagnosticCode::UnsupportedCast));
     }
 }
+
+#[path = "support/mlir_differential_v1.rs"]
+mod mlir_differential_v1;
+
+#[test]
+fn mlir_v1_saturating_casts_match_the_textual_emitter() {
+    use mlir_differential_v1::{BOTH_TARGETS, assert_equivalent, exact};
+    let module = cast_module(&[
+        ScalarType::I8,
+        ScalarType::U8,
+        ScalarType::I16,
+        ScalarType::U16,
+        ScalarType::I32,
+        ScalarType::U32,
+        ScalarType::I64,
+        ScalarType::U64,
+    ]);
+    for target in BOTH_TARGETS {
+        assert_equivalent("float_casts", &exact(module.clone(), target), target);
+    }
+}

@@ -105,6 +105,27 @@ fn launch_policy_admission_uses_the_flat_multidimensional_workgroup_size() {
 }
 
 #[test]
+fn ranged_launch_policy_narrows_flat_range_to_required_workgroup_size() {
+    let module = family_module();
+    let policies = [
+        policy("saxpy_wg64", 32, 512, 4, 8),
+        policy("saxpy_wg256", 64, 1024, 2, 4),
+    ];
+    let llvm =
+        lower_compiler_module_to_gfx942_llvm_ir_with_launch_policies(&module, &policies).unwrap();
+    assert!(
+        llvm.contains("\"amdgpu-flat-work-group-size\"=\"64,64\" \"amdgpu-waves-per-eu\"=\"4,8\"")
+    );
+    assert!(
+        llvm.contains(
+            "\"amdgpu-flat-work-group-size\"=\"256,256\" \"amdgpu-waves-per-eu\"=\"2,4\""
+        )
+    );
+    assert!(!llvm.contains("\"32,512\""));
+    assert!(!llvm.contains("\"64,1024\""));
+}
+
+#[test]
 fn missing_duplicate_unknown_and_incompatible_policies_fail_closed() {
     let module = family_module();
     let cases = [

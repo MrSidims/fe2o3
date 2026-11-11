@@ -357,3 +357,55 @@ fn all_control_flow_goldens_are_deterministic() {
         assert_eq!(first, second);
     }
 }
+
+#[path = "support/mlir_differential_v1.rs"]
+mod mlir_differential_v1;
+
+#[test]
+fn mlir_v1_control_flow_matches_the_textual_emitter() {
+    use mlir_differential_v1::{BOTH_TARGETS, assert_equivalent, exact};
+    for target in BOTH_TARGETS {
+        for (name, module) in [
+            ("branching_fill", branching_fill_module()),
+            ("integer_match", integer_match_module()),
+            ("nested_loop", nested_loop_module()),
+        ] {
+            let module = with_calling_kernel(module);
+            assert_equivalent(name, &exact(module, target), target);
+        }
+    }
+}
+
+/// Compiler-module lowering requires a kernel; call the exported helper from one.
+fn with_calling_kernel(mut module: Module) -> Module {
+    use fe2o3_kernel_ir::{Kernel, LaunchDomain, LaunchExtent, WorkgroupSize};
+    let callee = module.functions[0].id.clone();
+    let mut block = BasicBlock::new(BlockId(0));
+    block.operations = vec![Operation::effect_free(
+        ValueDef::new(value(1), U32),
+        OperationKind::Call {
+            callee,
+            arguments: vec![value(0)],
+        },
+    )];
+    block.terminator = Some(Terminator::Return { values: vec![] });
+    module.functions.push(Function::kernel_entry(
+        "mlir_entry",
+        Signature::new(vec![U32], vec![]),
+        vec![value(0)],
+        vec![block],
+    ));
+    let mut kernel = Kernel::new(
+        "mlir_kernel",
+        "mlir_entry",
+        LaunchDomain::D1 {
+            x: LaunchExtent::Dynamic,
+        },
+    );
+    kernel.workgroup_size = Some(WorkgroupSize::new(64, 1, 1));
+    kernel
+        .required_capabilities
+        .insert(TargetCapability::WaveWidth(WaveWidth::Wave64));
+    module.kernels.push(kernel);
+    module
+}

@@ -474,6 +474,43 @@ fn rejects_invalid_target_prefix_and_target_id() {
 }
 
 #[test]
+fn accepts_llvm24_subarch_target_spelling() {
+    // LLVM 24 emits the target ID from the FOUR_IDENT-normalized subarch triple.
+    let mut value = metadata((1, 2), vec![valid_kernel("k", "k.kd")]);
+    set_field(
+        &mut value,
+        "amdhsa.target",
+        Value::from("amdgpu9.42-amd-amdhsa-unknown-gfx942:sramecc-:xnack+"),
+    );
+    let mut bytes = hsaco(&encode(&value), 4, &[b"AMDGPU\0"]);
+    write_u32(&mut bytes, 48, 0xb4c);
+    assert_eq!(
+        inspect(&bytes).unwrap().target().to_string(),
+        "gfx942:sramecc-:xnack+"
+    );
+
+    for target in [
+        // Subarch disagrees with the processor named by the target ID.
+        "amdgpu9.50-amd-amdhsa-unknown-gfx942:sramecc-:xnack+",
+        // No subarch, and the LLVM 24 legacy-triple spelling.
+        "amdgpu-amd-amdhsa-unknown-gfx942:sramecc-:xnack+",
+        "amdgcn-amd-amdhsa-unknown-gfx942:sramecc-:xnack+",
+        // Mixed spellings.
+        "amdgpu9.42-amd-amdhsa--gfx942:sramecc-:xnack+",
+    ] {
+        let mut value = metadata((1, 2), vec![valid_kernel("k", "k.kd")]);
+        set_field(&mut value, "amdhsa.target", Value::from(target));
+        let mut bytes = hsaco(&encode(&value), 4, &[b"AMDGPU\0"]);
+        write_u32(&mut bytes, 48, 0xb4c);
+        assert_eq!(
+            inspect(&bytes),
+            Err(InspectionError::InvalidTargetPrefix),
+            "{target}"
+        );
+    }
+}
+
+#[test]
 fn requires_canonical_target_feature_order() {
     let mut noncanonical = metadata((1, 2), vec![valid_kernel("k", "k.kd")]);
     set_field(
